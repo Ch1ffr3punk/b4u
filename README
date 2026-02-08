@@ -1,0 +1,45 @@
+b4u - Usenet Binary File Transfer Tool
+
+Usage:
+  Send mode:    b4u -s -k <key> -n <newsgroups> -S <server:port> <file1> <file2> ...
+  Receive mode: b4u -r -k <key> -n <newsgroups> -S <server:port>
+  Save mode:    b4u -k <key> <file1> <file2> ...
+
+Required Options:
+  -k string        esub key password (required for all modes)
+  -n string        Newsgroups (comma separated, required for send/receive)
+  -S string        NNTP server:port (required for send/receive)
+
+Mode Selection:
+  -s               Send all files to newsgroup
+  -r               Receive all files from specified newsgroup
+  (no -s or -r)    Save articles locally without sending (creates 0001.txt, 0002.txt, etc.)
+
+File Options:
+  -b int           Block size in KB (default: 64, max recommended: 256)
+  -e               Email Mixmaster mode (omits From: header)
+  -t string        To: address (for email Mixmastere mode)
+
+NNTP Options:
+  -u string        NNTP username
+  -p string        NNTP password
+  -tls             Use TLS connection
+  -days int        Download articles from last N days (0 for all, default: 1)
+  -latest          Only fetch articles newer than last run
+  -batch int       Maximum batch size for XOVER command (default: 500)
+  -timeout int     Read timeout in seconds (default: 1200)
+
+Proxy Options:
+  -pp int          SOCKS5 proxy port (default: 9050 for Tor)
+
+Cache Options:
+  -rc              Enable replay cache and file cache
+  -dbpath string   Custom path for cache JSON file
+
+Examples:
+  Send file:    b4u -s -k "my-password" -n alt.test -S news.server.com:119 file.zip
+  Receive:      b4u -r -k "my-password" -n alt.test -S news.server.com:119
+  Save locally: b4u -k "my-password" file.zip (creates 0001.txt, 0002.txt, etc.)
+  Tor Browser:  b4u -r -k "my-password" -n alt.test -S news.server.com:119 -pp 9150
+  With cache:   b4u -r -k "my-password" -n alt.test -S news.server.com:119 -rc
+  Large files:  b4u -s -k "my-password" -n alt.test -S news.server.com:119 -b 256 large.zip
