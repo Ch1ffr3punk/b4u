@@ -17,8 +17,9 @@ Mode Selection:
 
 File Options:
   -b int           Block size in KB (default: 64, max recommended: 256)
-  -e               Email Mixmaster mode (omits From: header)
-  -t string        To: address (for email Mixmastere mode)
+  -e               Mixmaster email mode (omits From: header)
+  -f string        Custom From: header (default: Anonymous <anonymous@domain.tld>)
+  -t string        To: address (for Mixmaster email mode)
 
 NNTP Options:
   -u string        NNTP username
@@ -43,3 +44,5 @@ Examples:
   Tor Browser:  b4u -r -k "my-password" -n alt.test -S news.server.com:119 -pp 9150
   With cache:   b4u -r -k "my-password" -n alt.test -S news.server.com:119 -rc
   Large files:  b4u -s -k "my-password" -n alt.test -S news.server.com:119 -b 256 large.zip
+  Custom From:  b4u -s -k "my-password" -n alt.test -S news.server.com:119 -f "John Doe <john@example.com>" file.zip
+  Email mode:   b4u -s -k "my-password" -n alt.test -S news.server.com:119 -e -t "recipient@example.com" file.zip
