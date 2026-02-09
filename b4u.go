@@ -32,6 +32,7 @@ import (
 type Config struct {
 	Key        string // esub encryption key
 	To         string // Recipient for email mode
+	FromHeader string // Custom From: header (empty for default)
 	Newsgroups string // Newsgroups to post to or read from
 	BlockSize  int    // Block size in KB for splitting files
 	Send       bool   // Send mode flag
@@ -493,13 +494,23 @@ func parseDate(dateStr string) (time.Time, error) {
 }
 
 // writeHeadersInOrder writes headers in a consistent order
-func writeHeadersInOrder(buf *bytes.Buffer, header textproto.MIMEHeader, emailMode bool) {
+func writeHeadersInOrder(buf *bytes.Buffer, header textproto.MIMEHeader, config Config) {
 	// Define the desired header order
 	headerOrder := []string{"From", "To", "Subject", "Newsgroups", "X-Content"}
 	
 	for _, key := range headerOrder {
 		// Skip From header in email mode
-		if key == "From" && emailMode {
+		if key == "From" && config.EmailMode {
+			continue
+		}
+		
+		// Use custom From header if provided, otherwise default
+		if key == "From" && !config.EmailMode {
+			fromValue := "Anonymous <anonymous@domain.tld>"
+			if config.FromHeader != "" {
+				fromValue = config.FromHeader
+			}
+			buf.WriteString(fmt.Sprintf("From: %s\r\n", fromValue))
 			continue
 		}
 		
@@ -512,7 +523,7 @@ func writeHeadersInOrder(buf *bytes.Buffer, header textproto.MIMEHeader, emailMo
 }
 
 // postArticle posts a single article to the NNTP server with consistent header order
-func postArticle(conn net.Conn, article *Article, newsgroups string, emailMode bool) error {
+func postArticle(conn net.Conn, article *Article, newsgroups string, config Config) error {
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 
@@ -530,7 +541,7 @@ func postArticle(conn net.Conn, article *Article, newsgroups string, emailMode b
 	var buf bytes.Buffer
 	
 	// Write headers in specific order
-	writeHeadersInOrder(&buf, article.Header, emailMode)
+	writeHeadersInOrder(&buf, article.Header, config)
 	
 	// End of headers
 	buf.WriteString("\r\n")
@@ -935,7 +946,11 @@ func createArticles(filename string, blocks [][]byte, config Config) ([]*Article
 		
 		// Add From header unless in email mode
 		if !config.EmailMode {
-			header.Set("From", "Anonymous <anonymous@domain.invalid>")
+			fromValue := "Anonymous <anonymous@domain.tld>"
+			if config.FromHeader != "" {
+				fromValue = config.FromHeader
+			}
+			header.Set("From", fromValue)
 		}
 		
 		// Add recipient if specified (for email mode)
@@ -999,7 +1014,7 @@ func sendArticles(articles []*Article, config Config) error {
 
 	// Post articles
 	for i, article := range articles {
-		if err := postArticle(conn, article, config.Newsgroups, config.EmailMode); err != nil {
+		if err := postArticle(conn, article, config.Newsgroups, config); err != nil {
 			return fmt.Errorf("failed to post article %d: %v", i+1, err)
 		}
 		fmt.Printf("Posted article %d/%d for %s (esub: %s)\n", i+1, len(articles), article.Filename, article.Esub)
@@ -1248,6 +1263,7 @@ func printUsage() {
 	fmt.Println("File Options:")
 	fmt.Println("  -b int           Block size in KB (default: 64, max recommended: 256)")
 	fmt.Println("  -e               Mixmaster email mode (omits From: header)")
+	fmt.Println("  -f string        Custom From: header (default: Anonymous <anonymous@domain.tld>)")
 	fmt.Println("  -t string        To: address (for Mixmaster email mode)")
 	fmt.Println("")
 	fmt.Println("NNTP Options:")
@@ -1273,12 +1289,15 @@ func printUsage() {
 	fmt.Println("  Tor Browser:  b4u -r -k \"my-password\" -n alt.test -S news.server.com:119 -pp 9150")
 	fmt.Println("  With cache:   b4u -r -k \"my-password\" -n alt.test -S news.server.com:119 -rc")
 	fmt.Println("  Large files:  b4u -s -k \"my-password\" -n alt.test -S news.server.com:119 -b 256 large.zip")
+	fmt.Println("  Custom From:  b4u -s -k \"my-password\" -n alt.test -S news.server.com:119 -f \"John Doe <john@example.com>\" file.zip")
+	fmt.Println("  Email mode:   b4u -s -k \"my-password\" -n alt.test -S news.server.com:119 -e -t \"recipient@example.com\" file.zip")
 }
 
 func main() {
 	// Parse command line arguments
 	key := flag.String("k", "", "esub key password")
 	to := flag.String("t", "", "To: address (for email)")
+	fromHeader := flag.String("f", "", "Custom From: header (default: Anonymous <anonymous@domain.tld>)")
 	newsgroups := flag.String("n", "", "Newsgroups (comma separated)")
 	blockSize := flag.Int("b", 64, "Block size in KB (default 64)")
 	sendFlag := flag.Bool("s", false, "Send all files")
@@ -1314,6 +1333,7 @@ func main() {
 	config := Config{
 		Key:        *key,
 		To:         *to,
+		FromHeader: *fromHeader,
 		Newsgroups: *newsgroups,
 		BlockSize:  *blockSize,
 		Send:       *sendFlag,
@@ -1512,7 +1532,7 @@ func main() {
 				
 				var buf bytes.Buffer
 				// Write headers in consistent order
-				writeHeadersInOrder(&buf, article.Header, config.EmailMode)
+				writeHeadersInOrder(&buf, article.Header, config)
 				
 				buf.WriteString("\r\n")
 				
