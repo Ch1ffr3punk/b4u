@@ -1290,7 +1290,7 @@ func printUsage() {
 	fmt.Println("  With cache:   b4u -r -k \"my-password\" -n alt.test -S news.server.com:119 -rc")
 	fmt.Println("  Large files:  b4u -s -k \"my-password\" -n alt.test -S news.server.com:119 -b 256 large.zip")
 	fmt.Println("  Custom From:  b4u -s -k \"my-password\" -n alt.test -S news.server.com:119 -f \"John Doe <john@example.com>\" file.zip")
-	fmt.Println("  Email mode:   b4u -k \"my-password\" -n alt.test -S news.server.com:119 -e -t \"recipient@example.com\" file.zip")
+	fmt.Println("  Email mode:   b4u -k \"my-password\" -n alt.test -e -t \"recipient@example.com\" file.zip")
 }
 
 func main() {
