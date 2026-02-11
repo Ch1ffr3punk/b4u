@@ -30,6 +30,9 @@ NNTP Options:
   -batch int       Maximum batch size for XOVER command (default: 500)
   -timeout int     Read timeout in seconds (default: 1200)
 
+Output Options:
+  -v               Verbose output mode (shows progress and details)
+
 Proxy Options:
   -pp int          SOCKS5 proxy port (default: 9050 for Tor)
 
@@ -46,3 +49,4 @@ Examples:
   Large files:  b4u -s -k "my-password" -n alt.test -S news.server.com:119 -b 256 large.zip
   Custom From:  b4u -s -k "my-password" -n alt.test -S news.server.com:119 -f "John Doe <john@example.com>" file.zip
   Email mode:   b4u -k "my-password" [-n alt.test] -e -t "recipient@example.com" file.zip
+  Verbose mode: b4u -r -k "my-password" -n alt.test -S news.server.com:119 -rc -v -days 7
