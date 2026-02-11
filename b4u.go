@@ -47,6 +47,7 @@ type Config struct {
 	Latest     bool   // Only fetch articles newer than last run
 	MaxBatch   int    // Maximum batch size for XOVER command
 	Timeout    int    // Read timeout in seconds
+	Verbose    bool   // Verbose output mode
 }
 
 // Esub handles esub generation and validation
@@ -260,6 +261,39 @@ func (c *Cache) Cleanup() {
 		if entry.LastSeen.Before(cutoff) {
 			delete(c.FileCache, key)
 		}
+	}
+}
+
+// Helper functions for verbose output
+func verbosePrintf(config Config, format string, args ...interface{}) {
+	if config.Verbose {
+		fmt.Printf(format, args...)
+	}
+}
+
+func verbosePrintln(config Config, args ...interface{}) {
+	if config.Verbose {
+		fmt.Println(args...)
+	}
+}
+
+// Progress bar function
+func showProgress(current, total int, config Config) {
+	if !config.Verbose || total == 0 {
+		return
+	}
+	
+	barWidth := 50
+	progress := float64(current) / float64(total)
+	filled := int(progress * float64(barWidth))
+	
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	percent := int(progress * 100)
+	
+	fmt.Printf("\r[%s] %d/%d (%d%%)", bar, current, total, percent)
+	
+	if current >= total {
+		fmt.Println()
 	}
 }
 
@@ -635,12 +669,30 @@ func fetchArticles(conn net.Conn, config Config) ([]*Article, error) {
 	// Track downloaded file parts to avoid downloading same part multiple times
 	downloadedParts := make(map[string]bool) // key: "filename:total:hashPrefix"
 
+	// Progress tracking
+	totalArticlesFetched := 0
+	lastProgressUpdate := time.Now()
+	progressInterval := 5 * time.Second
+	totalInRange := last - batchStart + 1
+	
+	verbosePrintln(config, "Starting article download...")
+	verbosePrintf(config, "Article range: %d-%d (total: %d articles)\n", batchStart, last, totalInRange)
+	verbosePrintf(config, "Batch size: %d articles\n", config.MaxBatch)
+	
+	if config.Days > 0 {
+		verbosePrintf(config, "Date filter: last %d days (cutoff: %s)\n", 
+			config.Days, cutoff.Format("2006-01-02"))
+	}
+
 	// Process articles in batches
 	for batchStart <= last {
 		batchEnd := batchStart + config.MaxBatch - 1
 		if batchEnd > last {
 			batchEnd = last
 		}
+
+		verbosePrintf(config, "\nProcessing batch %d-%d (%d articles)\n", 
+			batchStart, batchEnd, batchEnd-batchStart+1)
 
 		// Get overview of articles in batch
 		fmt.Fprintf(conn, "XOVER %d-%d\r\n", batchStart, batchEnd)
@@ -701,6 +753,8 @@ func fetchArticles(conn net.Conn, config Config) ([]*Article, error) {
 			articleSubjects = append(articleSubjects, subject)
 		}
 
+		verbosePrintf(config, "  Found %d articles after filtering\n", len(articlesToFetch))
+
 		// Fetch individual articles
 		for i, num := range articlesToFetch {
 			subject := articleSubjects[i]
@@ -708,13 +762,31 @@ func fetchArticles(conn net.Conn, config Config) ([]*Article, error) {
 			// Mark as processed in this session
 			processedEsubs[subject] = true
 			
-			article, err := fetchArticleWithCache(conn, reader, num, config.Key, subject, esubValidator, downloadedParts)
+			article, err := fetchArticleWithCache(conn, reader, num, config.Key, subject, esubValidator, downloadedParts, config)
 			if err != nil {
-				fmt.Printf("Warning: %v\n", err)
+				if config.Verbose {
+					fmt.Printf("Warning: %v\n", err)
+				}
 				continue
 			}
 			if article != nil {
 				articles = append(articles, article)
+				totalArticlesFetched++
+				
+				// Show progress periodically
+				if time.Since(lastProgressUpdate) > progressInterval {
+					processed := batchEnd - first + 1
+					if processed > 0 {
+						percent := float64(processed) / float64(totalInRange) * 100
+						fmt.Printf("Progress: %d articles fetched, %.1f%% complete\n", 
+							totalArticlesFetched, percent)
+						lastProgressUpdate = time.Now()
+					}
+				}
+				
+				// Show each downloaded article in verbose mode
+				verbosePrintf(config, "  ✓ Downloaded: %s part %d/%d (article %s)\n", 
+					article.Filename, article.Part, article.Total, num)
 			}
 		}
 
@@ -749,6 +821,9 @@ func fetchArticles(conn net.Conn, config Config) ([]*Article, error) {
 		}
 	}
 
+	verbosePrintln(config, "\nDownload complete!")
+	verbosePrintf(config, "Total articles fetched: %d\n", totalArticlesFetched)
+	
 	return articles, nil
 }
 
@@ -760,7 +835,7 @@ func calculateHash(content []byte) string {
 
 // fetchArticleWithCache retrieves a single article with caching
 func fetchArticleWithCache(conn net.Conn, reader *bufio.Reader, articleNum, key, subject string, 
-	esubValidator *Esub, downloadedParts map[string]bool) (*Article, error) {
+	esubValidator *Esub, downloadedParts map[string]bool, config Config) (*Article, error) {
 	
 	// Validate esub BEFORE downloading article body
 	if !esubValidator.Validate(subject) {
@@ -825,7 +900,9 @@ func fetchArticleWithCache(conn net.Conn, reader *bufio.Reader, articleNum, key,
 		// Try with URL encoding if standard decoding fails
 		decoded, err = base64.URLEncoding.DecodeString(body.String())
 		if err != nil {
-			fmt.Printf("Warning: failed to decode base64 for article %s: %v\n", articleNum, err)
+			if config.Verbose {
+				fmt.Printf("Warning: failed to decode base64 for article %s: %v\n", articleNum, err)
+			}
 			return nil, nil
 		}
 	}
@@ -855,7 +932,9 @@ func fetchArticleWithCache(conn net.Conn, reader *bufio.Reader, articleNum, key,
 
 	// Skip if we don't have complete information
 	if filename == "" || part == 0 || total == 0 {
-		fmt.Printf("Warning: incomplete X-Content header in article %s: %s\n", articleNum, xContent)
+		if config.Verbose {
+			fmt.Printf("Warning: incomplete X-Content header in article %s: %s\n", articleNum, xContent)
+		}
 		return nil, nil
 	}
 
@@ -867,8 +946,10 @@ func fetchArticleWithCache(conn net.Conn, reader *bufio.Reader, articleNum, key,
 	
 	// Check if we've already downloaded this exact part in this session
 	if downloadedParts[partCacheKey] {
-		fmt.Printf("Skipping duplicate part %d/%d of %s (already downloaded this session)\n", 
-			part, total, filename)
+		if config.Verbose {
+			fmt.Printf("Skipping duplicate part %d/%d of %s (already downloaded this session)\n", 
+				part, total, filename)
+		}
 		return nil, nil
 	}
 	
@@ -878,7 +959,9 @@ func fetchArticleWithCache(conn net.Conn, reader *bufio.Reader, articleNum, key,
 	// Check file cache to avoid duplicates across sessions
 	if cache != nil {
 		if cache.HasFile(filename, part, contentHash) {
-			fmt.Printf("Skipping cached part %d/%d of %s\n", part, total, filename)
+			if config.Verbose {
+				fmt.Printf("Skipping cached part %d/%d of %s\n", part, total, filename)
+			}
 			return nil, nil
 		}
 		
@@ -987,6 +1070,8 @@ func createArticles(filename string, blocks [][]byte, config Config) ([]*Article
 func sendArticles(articles []*Article, config Config) error {
 	proxyAddr := fmt.Sprintf("127.0.0.1:%d", config.ProxyPort)
 	
+	verbosePrintln(config, "Connecting to NNTP server...")
+	
 	// Connect to NNTP server
 	conn, err := dialNNTP(config.NNTP, config.UseTLS, proxyAddr)
 	if err != nil {
@@ -1001,36 +1086,58 @@ func sendArticles(articles []*Article, config Config) error {
 
 	// Read server greeting
 	reader := bufio.NewReader(conn)
-	if _, err := reader.ReadString('\n'); err != nil {
+	greeting, err := reader.ReadString('\n')
+	if err != nil {
 		return fmt.Errorf("server greeting failed: %v", err)
 	}
+	verbosePrintf(config, "Server greeting: %s", greeting)
 
 	// Authenticate if credentials provided
 	if config.Username != "" {
+		verbosePrintln(config, "Authenticating...")
 		if err := authenticateNNTP(conn, config.Username, config.Password); err != nil {
 			return fmt.Errorf("authentication failed: %v", err)
 		}
+		verbosePrintln(config, "Authentication successful")
 	}
 
+	verbosePrintf(config, "Posting %d articles...\n", len(articles))
+	
 	// Post articles
 	for i, article := range articles {
 		if err := postArticle(conn, article, config.Newsgroups, config); err != nil {
 			return fmt.Errorf("failed to post article %d: %v", i+1, err)
 		}
 		fmt.Printf("Posted article %d/%d for %s (esub: %s)\n", i+1, len(articles), article.Filename, article.Esub)
-		time.Sleep(100 * time.Millisecond) // Small delay between posts
+		
+		// Show progress for large uploads
+		if config.Verbose && len(articles) > 10 {
+			if (i+1) % 10 == 0 || i == len(articles)-1 {
+				showProgress(i+1, len(articles), config)
+			}
+		}
+		
+		time.Sleep(500 * time.Millisecond) // Verzögerung zwischen Posts
 	}
 
 	// Disconnect
 	fmt.Fprintf(conn, "QUIT\r\n")
+	verbosePrintln(config, "All articles posted successfully")
+	
 	return nil
 }
 
 // reconstructFile reconstructs original files from article parts
-func reconstructFile(articles []*Article, outputDir string) error {
+func reconstructFile(articles []*Article, outputDir string, config Config) error {
 	if len(articles) == 0 {
+		if config.Verbose {
+			fmt.Println("No articles to reconstruct")
+		}
 		return errors.New("no articles to reconstruct")
 	}
+
+	verbosePrintln(config, "Reconstructing files from articles...")
+	verbosePrintf(config, "Total articles to process: %d\n", len(articles))
 
 	// First, group by filename
 	files := make(map[string]map[int][]*Article) // filename -> total -> articles
@@ -1044,10 +1151,15 @@ func reconstructFile(articles []*Article, outputDir string) error {
 		}
 	}
 	
+	verbosePrintf(config, "Found %d unique files\n", len(files))
+	
 	// For each filename, find the most complete set
+	reconstructedCount := 0
 	for filename, totalMap := range files {
-		fmt.Printf("\nProcessing file: %s\n", filename)
-		fmt.Printf("Found %d different versions (different totals)\n", len(totalMap))
+		if config.Verbose {
+			fmt.Printf("\nProcessing file: %s\n", filename)
+			fmt.Printf("Found %d different versions (different totals)\n", len(totalMap))
+		}
 		
 		// Find the best candidate (most complete set)
 		var bestTotal int
@@ -1055,7 +1167,9 @@ func reconstructFile(articles []*Article, outputDir string) error {
 		var bestCompleteness float64
 		
 		for total, articles := range totalMap {
-			fmt.Printf("  Version with %d total parts: found %d articles\n", total, len(articles))
+			if config.Verbose {
+				fmt.Printf("  Version with %d total parts: found %d articles\n", total, len(articles))
+			}
 			
 			// Count unique parts
 			uniqueParts := make(map[int]bool)
@@ -1064,7 +1178,9 @@ func reconstructFile(articles []*Article, outputDir string) error {
 			}
 			
 			completeness := float64(len(uniqueParts)) / float64(total)
-			fmt.Printf("    Completeness: %.1f%% (%d/%d)\n", completeness*100, len(uniqueParts), total)
+			if config.Verbose {
+				fmt.Printf("    Completeness: %.1f%% (%d/%d)\n", completeness*100, len(uniqueParts), total)
+			}
 			
 			if completeness > bestCompleteness || 
 			   (completeness == bestCompleteness && total > bestTotal) {
@@ -1075,27 +1191,35 @@ func reconstructFile(articles []*Article, outputDir string) error {
 		}
 		
 		if bestCompleteness == 0 {
-			fmt.Printf("No usable articles for %s\n", filename)
+			if config.Verbose {
+				fmt.Printf("No usable articles for %s\n", filename)
+			}
 			continue
 		}
 		
 		// Reconstruct the best version
-		if err := reconstructSingleFile(filename, bestTotal, bestArticles, outputDir); err != nil {
-			fmt.Printf("Error reconstructing %s: %v\n", filename, err)
+		if err := reconstructSingleFile(filename, bestTotal, bestArticles, outputDir, config); err != nil {
+			if config.Verbose {
+				fmt.Printf("Error reconstructing %s: %v\n", filename, err)
+			}
+		} else {
+			reconstructedCount++
 		}
 	}
+	
+	verbosePrintf(config, "\nReconstruction complete. Successfully reconstructed %d files.\n", reconstructedCount)
 	
 	return nil
 }
 
 // reconstructSingleFile reconstructs a single file from its articles
-func reconstructSingleFile(filename string, total int, articles []*Article, outputDir string) error {
+func reconstructSingleFile(filename string, total int, articles []*Article, outputDir string, config Config) error {
 	// Remove duplicates (keep first occurrence of each part)
 	partMap := make(map[int]*Article)
 	for _, article := range articles {
 		if _, exists := partMap[article.Part]; !exists {
 			partMap[article.Part] = article
-		} else {
+		} else if config.Verbose {
 			fmt.Printf("  Duplicate part %d, keeping first\n", article.Part)
 		}
 	}
@@ -1115,14 +1239,16 @@ func reconstructSingleFile(filename string, total int, articles []*Article, outp
 	
 	// Check completeness
 	if len(sortedArticles) != total {
-		fmt.Printf("  Warning: incomplete file (%d/%d parts)\n", len(sortedArticles), total)
-		fmt.Printf("  Missing parts: ")
-		for i := 1; i <= total; i++ {
-			if _, exists := partMap[i]; !exists {
-				fmt.Printf("%d ", i)
+		if config.Verbose {
+			fmt.Printf("  Warning: incomplete file (%d/%d parts)\n", len(sortedArticles), total)
+			fmt.Printf("  Missing parts: ")
+			for i := 1; i <= total; i++ {
+				if _, exists := partMap[i]; !exists {
+					fmt.Printf("%d ", i)
+				}
 			}
+			fmt.Println()
 		}
-		fmt.Println()
 		
 		// Create incomplete filename
 		filename = fmt.Sprintf("%s_INCOMPLETE_%dof%d", filename, len(sortedArticles), total)
@@ -1142,7 +1268,11 @@ func reconstructSingleFile(filename string, total int, articles []*Article, outp
 		}
 	}
 	
-	fmt.Printf("  Reconstructed: %s (%d parts)\n", outputPath, len(sortedArticles))
+	if config.Verbose {
+		fmt.Printf("  Successfully reconstructed: %s (%d/%d parts)\n", 
+			outputPath, len(sortedArticles), total)
+	}
+	
 	return nil
 }
 
@@ -1275,6 +1405,9 @@ func printUsage() {
 	fmt.Println("  -batch int       Maximum batch size for XOVER command (default: 500)")
 	fmt.Println("  -timeout int     Read timeout in seconds (default: 1200)")
 	fmt.Println("")
+	fmt.Println("Output Options:")
+	fmt.Println("  -v               Verbose output mode (shows progress and details)")
+	fmt.Println("")
 	fmt.Println("Proxy Options:")
 	fmt.Println("  -pp int          SOCKS5 proxy port (default: 9050 for Tor)")
 	fmt.Println("")
@@ -1291,6 +1424,7 @@ func printUsage() {
 	fmt.Println("  Large files:  b4u -s -k \"my-password\" -n alt.test -S news.server.com:119 -b 256 large.zip")
 	fmt.Println("  Custom From:  b4u -s -k \"my-password\" -n alt.test -S news.server.com:119 -f \"John Doe <john@example.com>\" file.zip")
 	fmt.Println("  Email mode:   b4u -k \"my-password\" [-n alt.test] -e -t \"recipient@example.com\" file.zip")
+	fmt.Println("  Verbose mode: b4u -r -k \"my-password\" -n alt.test -S news.server.com:119 -rc -v -days 7")
 }
 
 func main() {
@@ -1312,6 +1446,7 @@ func main() {
 	latest := flag.Bool("latest", false, "Only fetch articles newer than last run")
 	maxBatch := flag.Int("batch", 500, "Maximum batch size for XOVER command")
 	timeout := flag.Int("timeout", 1200, "Read timeout in seconds")
+	verboseFlag := flag.Bool("v", false, "Verbose output mode")
 	
 	flag.Usage = printUsage
 	flag.Parse()
@@ -1348,15 +1483,18 @@ func main() {
 		Latest:     *latest,
 		MaxBatch:   *maxBatch,
 		Timeout:    *timeout,
+		Verbose:    *verboseFlag,
 	}
 	
 	// Initialize cache (JSON-based)
 	if *rcFlag {
-		fmt.Println("Cache enabled")
+		if config.Verbose {
+			fmt.Println("Cache enabled")
+		}
 		if err := initCache(); err != nil {
 			fmt.Printf("Warning: cache initialization failed: %v\n", err)
 			fmt.Println("Continuing without cache...")
-		} else {
+		} else if config.Verbose {
 			fmt.Printf("Cache loaded from: %s\n", cache.filePath)
 			fmt.Printf("Replay cache entries: %d\n", len(cache.ReplayCache))
 			fmt.Printf("File cache entries: %d\n", len(cache.FileCache))
@@ -1368,9 +1506,23 @@ func main() {
 		if cache != nil {
 			if err := cache.Save(); err != nil {
 				fmt.Printf("Warning: failed to save cache: %v\n", err)
+			} else if config.Verbose {
+				fmt.Println("Cache saved successfully")
 			}
 		}
 	}()
+	
+	if config.Verbose {
+		fmt.Println("Verbose mode enabled")
+		fmt.Printf("Configuration:\n")
+		fmt.Printf("  Block size: %d KB\n", config.BlockSize)
+		fmt.Printf("  Max batch: %d\n", config.MaxBatch)
+		fmt.Printf("  Days: %d\n", config.Days)
+		fmt.Printf("  Timeout: %d seconds\n", config.Timeout)
+		if *rcFlag {
+			fmt.Printf("  Cache: enabled\n")
+		}
+	}
 	
 	// Handle send mode
 	if config.Send {
@@ -1430,13 +1582,23 @@ func main() {
 			os.Exit(1)
 		}
 		
+		if config.Verbose {
+			fmt.Println("Starting receive mode...")
+		}
+		
 		// Load previous state for this newsgroup
 		if err := loadState(config.Newsgroups); err != nil {
-			fmt.Printf("Warning: failed to load state: %v\n", err)
+			if config.Verbose {
+				fmt.Printf("Warning: failed to load state: %v\n", err)
+			}
 		}
 		
 		// Connect to NNTP server
 		proxyAddr := fmt.Sprintf("127.0.0.1:%d", config.ProxyPort)
+		if config.Verbose && config.ProxyPort > 0 {
+			fmt.Printf("Connecting via proxy: %s\n", proxyAddr)
+		}
+		
 		conn, err := dialNNTP(config.NNTP, config.UseTLS, proxyAddr)
 		if err != nil {
 			fmt.Printf("Connection failed: %v\n", err)
@@ -1451,16 +1613,26 @@ func main() {
 		
 		// Read server greeting
 		reader := bufio.NewReader(conn)
-		if _, err := reader.ReadString('\n'); err != nil {
+		greeting, err := reader.ReadString('\n')
+		if err != nil {
 			fmt.Printf("Server greeting failed: %v\n", err)
 			os.Exit(1)
+		}
+		if config.Verbose {
+			fmt.Printf("Server greeting: %s", greeting)
 		}
 		
 		// Authenticate if credentials provided
 		if config.Username != "" {
+			if config.Verbose {
+				fmt.Println("Authenticating...")
+			}
 			if err := authenticateNNTP(conn, config.Username, config.Password); err != nil {
 				fmt.Printf("Authentication failed: %v\n", err)
 				os.Exit(1)
+			}
+			if config.Verbose {
+				fmt.Println("Authentication successful")
 			}
 		}
 		
@@ -1473,7 +1645,7 @@ func main() {
 		
 		// Reconstruct files from articles
 		if len(articles) > 0 {
-			if err := reconstructFile(articles, "."); err != nil {
+			if err := reconstructFile(articles, ".", config); err != nil {
 				fmt.Printf("Error reconstructing files: %v\n", err)
 			}
 		} else {
