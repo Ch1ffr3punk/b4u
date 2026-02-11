@@ -38,11 +38,11 @@ type Config struct {
 	Send       bool   // Send mode flag
 	Receive    bool   // Receive mode flag
 	NNTP       string // NNTP server address
-	ProxyPort  int    // SOCKS5 proxy port (default 9050 for Tor)
+	ProxyPort  int    // SOCKS5 proxy port (0 = no proxy)
 	EmailMode  bool   // Email mode (no From: header)
 	Username   string // NNTP username for authentication
 	Password   string // NNTP password for authentication
-	UseTLS     bool   // Use TLS for NNTP connection
+	UseTLS     bool   // Use STARTTLS for NNTP connection
 	Days       int    // Download articles from last N days
 	Latest     bool   // Only fetch articles newer than last run
 	MaxBatch   int    // Maximum batch size for XOVER command
@@ -451,70 +451,162 @@ func saveState(group string) error {
 	return os.Rename(tempFile, path)
 }
 
-// dialNNTP establishes a connection to an NNTP server, optionally via proxy
-func dialNNTP(server string, useTLS bool, proxyAddr string) (net.Conn, error) {
-	// Determine port if not specified
-	address := server
-	if !strings.Contains(server, ":") {
-		if useTLS {
-			address = fmt.Sprintf("%s:563", server) // NNTPS default port
-		} else {
-			address = fmt.Sprintf("%s:119", server) // NNTP default port
-		}
+// dialNNTP establishes a connection to an NNTP server with STARTTLS support
+func dialNNTP(server string, useTLS bool, proxyPort int) (net.Conn, error) {
+	// Wenn proxyPort == 0, direkt verbinden (kein Proxy)
+	if proxyPort == 0 {
+		return dialDirect(server, useTLS)
 	}
-
-	// Connect via proxy if specified
-	if proxyAddr != "" {
-		dialer, err := proxy.SOCKS5("tcp", proxyAddr, nil, proxy.Direct)
-		if err != nil {
-			return nil, fmt.Errorf("proxy connection failed: %v", err)
-		}
-		conn, err := dialer.Dial("tcp", address)
-		if err != nil {
-			return nil, fmt.Errorf("proxy dial failed: %v", err)
-		}
-
-		// Wrap with TLS if needed
-		if useTLS {
-			return tls.Client(conn, &tls.Config{
-				InsecureSkipVerify: true, // Accept self-signed certificates
-				ServerName:         strings.Split(server, ":")[0],
-			}), nil
-		}
-		return conn, nil
-	}
-
-	// Direct connection
-	if useTLS {
-		return tls.Dial("tcp", address, &tls.Config{
-			InsecureSkipVerify: true,
-		})
-	}
-	return net.Dial("tcp", address)
+	
+	// Sonst mit Proxy verbinden
+	proxyAddr := fmt.Sprintf("127.0.0.1:%d", proxyPort)
+	return dialWithProxy(server, useTLS, proxyAddr)
 }
 
-// authenticateNNTP authenticates with the NNTP server
-func authenticateNNTP(conn net.Conn, username, password string) error {
-	// Send username
+func dialDirect(server string, useTLS bool) (net.Conn, error) {
+	address := server
+	if !strings.Contains(server, ":") {
+		address = fmt.Sprintf("%s:119", server) // Immer Port 119 für STARTTLS
+	}
+	
+	// Erst normale TCP Verbindung
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Wenn TLS gewünscht, STARTTLS durchführen
+	if useTLS {
+		reader := bufio.NewReader(conn)
+		
+		// STARTTLS Befehl
+		fmt.Fprintf(conn, "STARTTLS\r\n")
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("STARTTLS failed: %v", err)
+		}
+		
+		if !strings.HasPrefix(response, "382 ") {
+			conn.Close()
+			return nil, fmt.Errorf("STARTTLS not supported: %s", strings.TrimSpace(response))
+		}
+		
+		// TLS Handshake
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         strings.Split(server, ":")[0],
+			MinVersion:         tls.VersionTLS12,
+		}
+		
+		tlsConn := tls.Client(conn, tlsConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("TLS handshake failed: %v", err)
+		}
+		return tlsConn, nil
+	}
+	
+	return conn, nil
+}
+
+func dialWithProxy(server string, useTLS bool, proxyAddr string) (net.Conn, error) {
+	address := server
+	if !strings.Contains(server, ":") {
+		address = fmt.Sprintf("%s:119", server)
+	}
+	
+	dialer, err := proxy.SOCKS5("tcp", proxyAddr, nil, proxy.Direct)
+	if err != nil {
+		return nil, fmt.Errorf("proxy connection failed: %v", err)
+	}
+	
+	conn, err := dialer.Dial("tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("proxy dial failed: %v", err)
+	}
+	
+	if useTLS {
+		reader := bufio.NewReader(conn)
+		
+		fmt.Fprintf(conn, "STARTTLS\r\n")
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("STARTTLS failed: %v", err)
+		}
+		
+		if !strings.HasPrefix(response, "382 ") {
+			conn.Close()
+			return nil, fmt.Errorf("STARTTLS not supported: %s", strings.TrimSpace(response))
+		}
+		
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         strings.Split(server, ":")[0],
+			MinVersion:         tls.VersionTLS12,
+		}
+		
+		tlsConn := tls.Client(conn, tlsConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("TLS handshake failed: %v", err)
+		}
+		return tlsConn, nil
+	}
+	
+	return conn, nil
+}
+
+// authenticateNNTP für Eternal-September mit AUTHINFO USER/PASS
+func authenticateNNTP(conn net.Conn, username, password string, config Config) error {
+	reader := bufio.NewReader(conn)
+	
+	if config.Verbose {
+		fmt.Println("Authenticating with AUTHINFO USER/PASS...")
+	}
+	
+	// MODE READER (wichtig für Eternal-September)
+	fmt.Fprintf(conn, "MODE READER\r\n")
+	modeResponse, _ := reader.ReadString('\n')
+	if config.Verbose {
+		fmt.Printf("MODE READER response: %s", modeResponse)
+	}
+	
+	// AUTHINFO USER
 	fmt.Fprintf(conn, "AUTHINFO USER %s\r\n", username)
-	response, err := bufio.NewReader(conn).ReadString('\n')
+	response, err := reader.ReadString('\n')
 	if err != nil {
 		return fmt.Errorf("auth user read failed: %v", err)
 	}
-	if !strings.HasPrefix(response, "381") {
+	
+	if config.Verbose {
+		fmt.Printf("AUTHINFO USER response: %s", response)
+	}
+	
+	if !strings.HasPrefix(response, "381 ") {
 		return fmt.Errorf("auth user failed: %s", strings.TrimSpace(response))
 	}
-
-	// Send password
+	
+	// AUTHINFO PASS
 	fmt.Fprintf(conn, "AUTHINFO PASS %s\r\n", password)
-	response, err = bufio.NewReader(conn).ReadString('\n')
+	response, err = reader.ReadString('\n')
 	if err != nil {
 		return fmt.Errorf("auth pass read failed: %v", err)
 	}
-	if !strings.HasPrefix(response, "281") {
-		return fmt.Errorf("auth pass failed: %s", strings.TrimSpace(response))
+	
+	if config.Verbose {
+		fmt.Printf("AUTHINFO PASS response: %s", response)
 	}
-	return nil
+	
+	if strings.HasPrefix(response, "281 ") {
+		if config.Verbose {
+			fmt.Println("Authentication successful!")
+		}
+		return nil
+	}
+	
+	return fmt.Errorf("auth pass failed: %s", strings.TrimSpace(response))
 }
 
 // parseDate parses an NNTP date string
@@ -1068,12 +1160,10 @@ func createArticles(filename string, blocks [][]byte, config Config) ([]*Article
 
 // sendArticles posts multiple articles to the NNTP server
 func sendArticles(articles []*Article, config Config) error {
-	proxyAddr := fmt.Sprintf("127.0.0.1:%d", config.ProxyPort)
-	
 	verbosePrintln(config, "Connecting to NNTP server...")
 	
 	// Connect to NNTP server
-	conn, err := dialNNTP(config.NNTP, config.UseTLS, proxyAddr)
+	conn, err := dialNNTP(config.NNTP, config.UseTLS, config.ProxyPort)
 	if err != nil {
 		return fmt.Errorf("failed to connect to NNTP server: %v", err)
 	}
@@ -1094,11 +1184,9 @@ func sendArticles(articles []*Article, config Config) error {
 
 	// Authenticate if credentials provided
 	if config.Username != "" {
-		verbosePrintln(config, "Authenticating...")
-		if err := authenticateNNTP(conn, config.Username, config.Password); err != nil {
+		if err := authenticateNNTP(conn, config.Username, config.Password, config); err != nil {
 			return fmt.Errorf("authentication failed: %v", err)
 		}
-		verbosePrintln(config, "Authentication successful")
 	}
 
 	verbosePrintf(config, "Posting %d articles...\n", len(articles))
@@ -1399,7 +1487,7 @@ func printUsage() {
 	fmt.Println("NNTP Options:")
 	fmt.Println("  -u string        NNTP username")
 	fmt.Println("  -p string        NNTP password")
-	fmt.Println("  -tls             Use TLS connection")
+	fmt.Println("  -tls             Use STARTTLS for encrypted connection")
 	fmt.Println("  -days int        Download articles from last N days (0 for all, default: 1)")
 	fmt.Println("  -latest          Only fetch articles newer than last run")
 	fmt.Println("  -batch int       Maximum batch size for XOVER command (default: 500)")
@@ -1409,7 +1497,7 @@ func printUsage() {
 	fmt.Println("  -v               Verbose output mode (shows progress and details)")
 	fmt.Println("")
 	fmt.Println("Proxy Options:")
-	fmt.Println("  -pp int          SOCKS5 proxy port (default: 9050 for Tor)")
+	fmt.Println("  -pp int          SOCKS5 proxy port (0 = no proxy, default: 9050)")
 	fmt.Println("")
 	fmt.Println("Cache Options:")
 	fmt.Println("  -rc              Enable replay cache and file cache")
@@ -1418,13 +1506,12 @@ func printUsage() {
 	fmt.Println("Examples:")
 	fmt.Println("  Send file:    b4u -s -k \"my-password\" -n alt.test -S news.server.com:119 file.zip")
 	fmt.Println("  Receive:      b4u -r -k \"my-password\" -n alt.test -S news.server.com:119")
+	fmt.Println("  Verbose:      b4u -r -k \"my-password\" -n alt.test -S news.server.com:119 -v")
 	fmt.Println("  Save locally: b4u -k \"my-password\" file.zip (creates 0001.txt, 0002.txt, etc.)")
-	fmt.Println("  Tor Browser:  b4u -r -k \"my-password\" -n alt.test -S news.server.com:119 -pp 9150")
+	fmt.Println("  W/o proxy:    b4u -r -k \"my-password\" -n alt.test -S news.server.com:119 -pp 0")
 	fmt.Println("  With cache:   b4u -r -k \"my-password\" -n alt.test -S news.server.com:119 -rc")
 	fmt.Println("  Large files:  b4u -s -k \"my-password\" -n alt.test -S news.server.com:119 -b 256 large.zip")
 	fmt.Println("  Custom From:  b4u -s -k \"my-password\" -n alt.test -S news.server.com:119 -f \"John Doe <john@example.com>\" file.zip")
-	fmt.Println("  Email mode:   b4u -k \"my-password\" [-n alt.test] -e -t \"recipient@example.com\" file.zip")
-	fmt.Println("  Verbose mode: b4u -r -k \"my-password\" -n alt.test -S news.server.com:119 -rc -v -days 7")
 }
 
 func main() {
@@ -1437,11 +1524,11 @@ func main() {
 	sendFlag := flag.Bool("s", false, "Send all files")
 	receiveFlag := flag.Bool("r", false, "Receive all files from specified newsgroup")
 	nntpServer := flag.String("S", "", "NNTP server:port")
-	proxyPort := flag.Int("pp", 9050, "Proxy port")
+	proxyPort := flag.Int("pp", 9050, "SOCKS5 proxy port (0 = no proxy)")
 	emailMode := flag.Bool("e", false, "Email mode (no From: header)")
 	username := flag.String("u", "", "NNTP username")
 	password := flag.String("p", "", "NNTP password")
-	useTLS := flag.Bool("tls", false, "Use TLS connection")
+	useTLS := flag.Bool("tls", false, "Use STARTTLS for encrypted connection")
 	days := flag.Int("days", 1, "Download articles from last N days (0 for all)")
 	latest := flag.Bool("latest", false, "Only fetch articles newer than last run")
 	maxBatch := flag.Int("batch", 500, "Maximum batch size for XOVER command")
@@ -1519,6 +1606,13 @@ func main() {
 		fmt.Printf("  Max batch: %d\n", config.MaxBatch)
 		fmt.Printf("  Days: %d\n", config.Days)
 		fmt.Printf("  Timeout: %d seconds\n", config.Timeout)
+		fmt.Printf("  Proxy port: %d\n", config.ProxyPort)
+		if config.ProxyPort == 0 {
+			fmt.Printf("  Proxy: disabled\n")
+		}
+		if config.UseTLS {
+			fmt.Printf("  STARTTLS: enabled\n")
+		}
 		if *rcFlag {
 			fmt.Printf("  Cache: enabled\n")
 		}
@@ -1594,12 +1688,7 @@ func main() {
 		}
 		
 		// Connect to NNTP server
-		proxyAddr := fmt.Sprintf("127.0.0.1:%d", config.ProxyPort)
-		if config.Verbose && config.ProxyPort > 0 {
-			fmt.Printf("Connecting via proxy: %s\n", proxyAddr)
-		}
-		
-		conn, err := dialNNTP(config.NNTP, config.UseTLS, proxyAddr)
+		conn, err := dialNNTP(config.NNTP, config.UseTLS, config.ProxyPort)
 		if err != nil {
 			fmt.Printf("Connection failed: %v\n", err)
 			os.Exit(1)
@@ -1624,15 +1713,9 @@ func main() {
 		
 		// Authenticate if credentials provided
 		if config.Username != "" {
-			if config.Verbose {
-				fmt.Println("Authenticating...")
-			}
-			if err := authenticateNNTP(conn, config.Username, config.Password); err != nil {
+			if err := authenticateNNTP(conn, config.Username, config.Password, config); err != nil {
 				fmt.Printf("Authentication failed: %v\n", err)
 				os.Exit(1)
-			}
-			if config.Verbose {
-				fmt.Println("Authentication successful")
 			}
 		}
 		
