@@ -117,6 +117,15 @@ func NewCache(path string) (*Cache, error) {
 	if err := c.Load(); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
+	
+	// Double-check maps are initialized (in case Load failed or loaded nil maps)
+	if c.ReplayCache == nil {
+		c.ReplayCache = make(map[string]time.Time)
+	}
+	if c.FileCache == nil {
+		c.FileCache = make(map[string][]FileCacheEntry)
+	}
+	
 	return c, nil
 }
 
@@ -135,8 +144,20 @@ func (c *Cache) Load() error {
 	if err := json.Unmarshal(data, &loaded); err != nil {
 		return err
 	}
-	c.ReplayCache = loaded.ReplayCache
-	c.FileCache = loaded.FileCache
+	
+	// Initialize maps if they're nil
+	if loaded.ReplayCache == nil {
+		c.ReplayCache = make(map[string]time.Time)
+	} else {
+		c.ReplayCache = loaded.ReplayCache
+	}
+	
+	if loaded.FileCache == nil {
+		c.FileCache = make(map[string][]FileCacheEntry)
+	} else {
+		c.FileCache = loaded.FileCache
+	}
+	
 	return nil
 }
 
