@@ -869,9 +869,9 @@ func fetchArticles(conn net.Conn, config Config) ([]*Article, error) {
 				if time.Since(lastProgressUpdate) > progressInterval {
 					processed := batchEnd - first + 1
 					if processed > 0 {
-						percent := float64(processed) / float64(totalInRange) * 100
-						fmt.Printf("Progress: %d articles fetched, %.1f%% complete\n", 
-							totalArticlesFetched, percent)
+						// percent := float64(processed) / float64(totalInRange) * 100
+						// fmt.Printf("Progress: %d articles fetched, %.1f%% complete\n", 
+						//	totalArticlesFetched, percent)
 						lastProgressUpdate = time.Now()
 					}
 				}
