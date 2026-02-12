@@ -22,11 +22,8 @@ File Options:
   -t string        To: address (for Mixmaster email mode)
 
 NNTP Options:
-  -u string        NNTP username
-  -p string        NNTP password
   -tls             Use STARTTLS for encrypted connection
-  -days int        Download articles from last N days (0 for all, default: 1)
-  -latest          Only fetch articles newer than last run
+  -latest int      Download only last N articles (0 = all, default: 0)
   -batch int       Maximum batch size for XOVER command (default: 500)
   -timeout int     Read timeout in seconds (default: 1200)
 
@@ -36,16 +33,22 @@ Output Options:
 Proxy Options:
   -pp int          SOCKS5 proxy port (0 = no proxy, default: 9050)
 
-Cache Options:
+Cache & Resume Options:
   -rc              Enable replay cache and file cache
   -dbpath string   Custom path for cache JSON file
 
+Behavior Notes:
+  • Without -rc:        Downloads all articles from beginning
+  • With -rc only:      Downloads all articles + saves state/cache
+  • With -rc -latest N: Downloads only last N articles (ignores state)
+  • State file:         <newsgroup>.json tracks last downloaded article
+
 Examples:
-  Send file:    b4u -s -k "my-password" -n alt.test -S news.server.com:119 file.zip
-  Receive:      b4u -r -k "my-password" -n alt.test -S news.server.com:119
-  Verbose:      b4u -r -k "my-password" -n alt.test -S news.server.com:119 -v
-  Save locally: b4u -k "my-password" file.zip (creates 0001.txt, 0002.txt, etc.)
-  Minus proxy:  b4u -r -k "my-password" -n alt.test -S news.server.com:119 -pp 0
-  With cache:   b4u -r -k "my-password" -n alt.test -S news.server.com:119 -rc
-  Large files:  b4u -s -k "my-password" -n alt.test -S news.server.com:119 -b 256 large.zip
+  Send file:         b4u -s -k "my-password" -n alt.test -S news.server.com:119 file.zip
+  Receive all:       b4u -r -k "my-password" -n alt.test -S news.server.com:119 -rc
+  Last 250 articles: b4u -r -k "my-password" -n alt.test -S news.server.com:119 -latest 250
+  Resume new only:   b4u -r -k "my-password" -n alt.test -S news.server.com:119 -rc
+  Verbose output:    b4u -r -k "my-password" -n alt.test -S news.server.com:119 -v -rc
+  No proxy:          b4u -r -k "my-password" -n alt.test -S news.server.com:119 -pp 0 -rc
+  Large blocks:      b4u -s -k "my-password" -n alt.test -S news.server.com:119 -b 256 file.zip
   Custom From:  b4u -s -k "my-password" -n alt.test -S news.server.com:119 -f "John Doe <john@example.com>" file.zip
